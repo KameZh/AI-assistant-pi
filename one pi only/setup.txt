@@ -1,1 +1,2 @@
 pip install sounddevice numpy vosk rich requests
+pip install -U duckduckgo-search
