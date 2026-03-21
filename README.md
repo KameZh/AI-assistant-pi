@@ -111,7 +111,7 @@ If all previous steps were a success you can leave your PC on with ollama runnin
 
 #### SoloPi
 ```
-python unified.py
+python solopi.py
 ```
 #### PiDuo (with 2 raspberry pis)
 ##### 1. Start the second PI (The server before the PC)
