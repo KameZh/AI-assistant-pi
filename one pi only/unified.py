@@ -13,7 +13,7 @@ from ddgs import DDGS
 load_dotenv()
 LLM_TEMP = 0.3
 PC_HOST = os.getenv("PCIP")
-MODEL = "gpt-oss:20b"
+MODEL = os.getenv("LLM")
 WAKE_WORD = "right"
 VOSK_MODEL_PATH = "/home/samol/vosk-model/vosk-model-small-en-us-0.15"
 PIPER_MODEL = "/home/samol/Desktop/en_US-lessac-medium.onnx"

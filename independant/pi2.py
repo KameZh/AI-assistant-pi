@@ -13,7 +13,7 @@ load_dotenv()
 
 # --- CONFIG ---
 PC_HOST = os.getenv("PCIP")
-MODEL = "gpt-oss:20b"
+MODEL = os.getenv("LLM")
 
 def web_search(query: str):
     console.print(f"[bold yellow]🔍 Web Search:[/][italic] {query}[/]")
