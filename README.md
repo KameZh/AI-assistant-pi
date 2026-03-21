@@ -92,16 +92,13 @@ Value: 0.0.0.0:11434
 Inside create a variable that looks like this:
 ```
 PCIP = "<here place the ip of the computer from Tailscale>"
+LLM = "<name of the installed model>"
 ```
 
 ### 7. Download the desired LLM model on the machine from the ollama application on the PC
 
-#### Note: the name of the language model shall be changed inside of the .env file
+#### Note: the name of the language model shall be changed inside of the .env file from previous step
 
-Crate a new variable like this: 
-```
-LLM = "<name of the installed model>"
-```
 ### 8. Configure the audio interfaces
 ```
 arecord -l  # List recording devices
@@ -112,11 +109,11 @@ aplay -l   # List playback devices
 
 If all previous steps were a success you can leave your PC on with ollama running and start the script:
 
-#### One pi only 
+#### SoloPi
 ```
 python unified.py
 ```
-#### independant (with 2 raspberry pis)
+#### PiDuo (with 2 raspberry pis)
 ##### 1. Start the second PI (The server before the PC)
 ```
 python pi2.py
@@ -125,8 +122,8 @@ python pi2.py
 ```
 python pi1.py
 ```
-#### IMPORTANT NOTE FOR RUNNING INDEPENDANT SYSTEMS
-Before starting anything you have to configure the IP addresses of each raspberry to correspond to the chosen script for it:
+#### IMPORTANT NOTE FOR RUNNING PIDUO SYSTEMS
+Before starting anything you have to connect the two raspberries with a networking cable and configure the IP addresses of each raspberry to correspond to the chosen script for it:
 
 On the raspberry running pi1.py ```192.168.0.1```
 
