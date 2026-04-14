@@ -1,2 +1,12 @@
-pip install sounddevice numpy vosk rich requests python-dotenv
-pip install -U duckduckgo-search
+# 1. Update system and install required system-level audio dependencies
+sudo apt update
+sudo apt install -y libportaudio2 portaudio19-dev
+
+# 2. Create a Python virtual environment named 'pip-env'
+python3 -m venv pip-env
+
+# 3. Activate the virtual environment
+source pip-env/bin/activate
+
+# 4. Install the required Python libraries
+pip install sounddevice numpy vosk faster-whisper rich scipy requests
