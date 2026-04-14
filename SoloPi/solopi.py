@@ -1,4 +1,4 @@
-import json, os, queue, re, requests, time
+import json, os, queue, re, requests, time, datetime, subprocess
 import sounddevice as sd
 import numpy as np
 from vosk import Model, KaldiRecognizer
@@ -7,20 +7,20 @@ from rich.live import Live
 from rich.panel import Panel
 from rich.text import Text
 import scipy.io.wavfile as wav
+import wikipedia
 
-# --- CONFIGURATION ---
-WAKE_WORD = "beep"
+WAKE_WORD = "pip"
 VOSK_PATH = "/home/samol/vosk-model-small-en-us-0.15"
 PIPER_EN = "/home/samol/Desktop/ai-assist/en_US-lessac-medium.onnx" 
 PIPER_BG = "/home/samol/Desktop/ai-assist/bg_BG-dimitar-medium.onnx"
 PIPER_EXE = "/home/samol/Desktop/ai-assist/piper/piper"
+
 PC_TAILSCALE_IP = "100.X.X.X" 
 AI_MODEL = "gemma4:e2b"
 USE_THINKING = False
 
-# --- 1. STARTUP MENU (LANGUAGE LOCK) ---
 print("\n" + "="*45)
-print(" PIP ASSISTANT - STARTUP CONFIGURATION")
+print(" PIP ASSISTANT - OMNI-NODE CONFIGURATION")
 print("="*45)
 while True:
     lang_choice = input("What language will you be using (b - bulgarian / e - english)? ").strip().lower()
@@ -40,11 +40,9 @@ else:
 print(f"\n=> Language securely locked to: {SYS_LANG}")
 print("=> Booting AI Engines...\n")
 
-# --- 2. ENGINE INITIALIZATION ---
 stt_model = WhisperModel("tiny", device="cpu", compute_type="int8")
 audio_q = queue.Queue()
 
-# Lock Gemma's persona into the chosen language
 base_instructions = f"Your name is Pip. You are a helpful voice assistant. You MUST respond strictly and concisely in {SYS_LANG}.Don't suggest anything harmful. Use slurs only if user uses first. Refer to user as user. The user's name is user if not specified otherwise. Try to be as helpful as possible. Acknowledge this."
 if USE_THINKING:
     base_instructions += " Think step-by-step and lay out your logic before providing your final answer."
@@ -64,8 +62,8 @@ def speak(text, live):
     if not text: return
     clean_text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
     clean_text = re.sub(r'<\|.*?\|>', '', clean_text).strip()
+    clean_text = re.sub(r'\[Context:.*?\]', '', clean_text).strip() # Hide intercepted data if AI repeats it
     
-    # Clean text differently depending on the chosen language
     if STT_LANG == "bg":
         clean_tts = re.sub(r'[^a-zA-Z0-9\s.,?!а-яА-Я]', ' ', clean_text).strip()
     else:
@@ -74,16 +72,63 @@ def speak(text, live):
     live.update(Panel(Text(f"Pip: {clean_tts}\nStatus: Speaking...")))
     os.system(f"echo '{clean_tts}' | {PIPER_EXE} --model {ACTIVE_TTS} --output_raw | aplay -D plughw:2,0 -r 22050 -f S16_LE -t raw -q")
 
+def process_skills(question):
+    """The Interceptor: Grabs real-world data before asking the LLM"""
+    q_lower = question.lower()
+    system_injection = ""
+
+    if any(w in q_lower for w in ["time", "часът", "date", "дата"]):
+        now = datetime.datetime.now().strftime("%I:%M %p on %A, %B %d, %Y")
+        system_injection += f"[Context: The current time and date is {now}.] "
+
+    if any(w in q_lower for w in ["weather", "времето", "temperature", "температура"]):
+        try:
+            wttr = requests.get("https://wttr.in/?format=%l:+%C+%t", timeout=5).text.strip()
+            system_injection += f"[Context: The current weather is {wttr}.] "
+        except:
+            system_injection += "[Context: Network error, weather unavailable.] "
+
+    if any(w in q_lower for w in ["system status", "системен статус", "how are you feeling", "статус"]):
+        temp = get_temp()
+        free = os.popen("free -m").readlines()[1].split()
+        ram = f"{free[2]}MB used out of {free[1]}MB"
+        system_injection += f"[Context: Your Raspberry Pi CPU temperature is {temp}°C and RAM usage is {ram}.] "
+
+    if any(w in q_lower for w in ["wikipedia", "уикипедия"]):
+        triggers = ["search wikipedia for", "what is on wikipedia about", "wikipedia", "уикипедия", "търси в", "за"]
+        search_term = q_lower
+        for t in triggers:
+            search_term = search_term.replace(t, "")
+        search_term = search_term.strip()
+        
+        if len(search_term) > 2:
+            try:
+                wikipedia.set_lang("bg" if STT_LANG == "bg" else "en")
+                summary = wikipedia.summary(search_term, sentences=2)
+                system_injection += f"[Context from Wikipedia: {summary}. Answer based on this.] "
+            except wikipedia.exceptions.DisambiguationError:
+                system_injection += "[Context: Too many Wikipedia results. Ask user to be specific.] "
+            except Exception:
+                system_injection += "[Context: Could not find Wikipedia article.] "
+
+    if system_injection:
+        return f"{system_injection}\nUser asked: {question}"
+    
+    return question
+
 def ask_pc(question):
     global chat_history
     if len(chat_history) > 6: 
         chat_history = chat_history[:2] + chat_history[-4:]
+    
     chat_history.append({"role": "user", "content": question})
+    
     payload = {
         "model": AI_MODEL,
         "messages": chat_history,
         "stream": False
     }
+    
     try:
         url = f"http://{PC_TAILSCALE_IP}:11434/api/chat"
         r = requests.post(url, json=payload, timeout=30)
@@ -126,16 +171,17 @@ def main():
                         wav.write("query.wav", 48000, audio_data)
                         
                         live.update(Panel(Text(f"Status: Transcribing... | Temp: {temp}°C", style="magenta")))
-                        
-                        # THE FIX: Force Whisper to strictly use the selected language
                         segments, _ = stt_model.transcribe("query.wav", beam_size=5, language=STT_LANG)
                         q_text = "".join([s.text for s in segments]).strip()
                         
                         if q_text and len(q_text) > 2:
                             live.update(Panel(Text(f"Q: {q_text}\nStatus: PC Thinking... | Temp: {temp}°C", style="cyan")))
-                            ans = ask_pc(q_text)
+                            
+                            processed_text = process_skills(q_text)
+                            ans = ask_pc(processed_text)
                             speak(ans, live)
-                            live.update(Panel(Text(f"Last Q: {q_text}\nPip: {ans}\n\nStatus: Waiting for 'Pi' | Temp: {temp}°C | Lang: {STT_LANG.upper()}", style="green")))
+                            
+                            live.update(Panel(Text(f"Last Q: {q_text}\nPip: {ans}\n\nStatus: Waiting for 'Pip' | Temp: {temp}°C | Lang: {STT_LANG.upper()}", style="green")))
                         else:
                             live.update(Panel(Text(f"Failed to hear you. Whisper heard: '{q_text}'", style="red")))
                             time.sleep(3)
