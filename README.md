@@ -33,10 +33,7 @@ sudo apt update
 sudo apt install -y libportaudio2 portaudio19-dev
 ```
 
-Next, check the `setup.txt` file inside your specific version folder for the Python requirements. Activate your virtual environment and install them:
-```bash
-pip install -r requirements.txt
-```
+Next, check the `setup.txt` file inside your specific version folder for the Python requirements. Activate your virtual environment and install them. The commands are ready to install so just copy and paste them into terminal.
 
 #### Manual Piper TTS Installation (Crucial for Raspberry Pi)
 Raspberry Pi architecture requires the raw Piper binary to work correctly. Run these commands inside your project folder:
