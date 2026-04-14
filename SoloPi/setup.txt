@@ -9,4 +9,4 @@ python3 -m venv pip-env
 source pip-env/bin/activate
 
 # 4. Install the required Python libraries
-pip install sounddevice numpy vosk faster-whisper rich scipy requests
+pip install sounddevice numpy vosk faster-whisper rich scipy requests wikipedia
