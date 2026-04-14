@@ -1,168 +1,122 @@
-import json, os, sys, queue, subprocess, re, requests, threading, time, logging, signal
-from dotenv import load_dotenv, dotenv_values 
+import json, os, queue, re, requests, time
 import sounddevice as sd
+import numpy as np
 from vosk import Model, KaldiRecognizer
-from rich.console import Console
-from rich.panel import Panel
+from faster_whisper import WhisperModel
 from rich.live import Live
+from rich.panel import Panel
 from rich.text import Text
-import termios, tty, select
-from ddgs import DDGS
+import scipy.io.wavfile as wav
 
-# --- 1. SETTINGS & CONFIG ---
-load_dotenv()
-LLM_TEMP = 0.3
-PC_HOST = os.getenv("PCIP")
-MODEL = os.getenv("LLM")
-WAKE_WORD = "right"
-VOSK_MODEL_PATH = "/home/samol/vosk-model/vosk-model-small-en-us-0.15"
-PIPER_MODEL = "/home/samol/Desktop/en_US-lessac-medium.onnx"
+# --- CONFIGURATION ---
+WAKE_WORD = "pip"
+VOSK_PATH = "/home/samol/vosk-model-small-en-us-0.15"
+PIPER_EN = "/home/samol/Desktop/ai-assist/en_US-lessac-medium.onnx" 
+PIPER_BG = "/home/samol/Desktop/ai-assist/bg_BG-dimitar-medium.onnx"
 
-logging.getLogger("duckduckgo_search").setLevel(logging.CRITICAL)
-console = Console()
-audio_q = queue.Queue(maxsize=10)
-chat_history = [{"role": "system", "content": "You are Pip. Use web_search for news. Be concise."}]
+# ---> PUT YOUR PC'S TAILSCALE IP HERE <---
+PC_TAILSCALE_IP = "100.X.X.X" 
 
-ui_state = {
-    "status": "Idle (Waiting for 'Right')",
-    "partial": "",
-    "color": "cyan",
-    "cpu_temp": "00.0"
-}
+# 1. Initialize Whisper (Local Ears)
+stt_model = WhisperModel("tiny", device="cpu", compute_type="int8")
+audio_q = queue.Queue()
 
-# --- 2. SYSTEM HELPERS ---
-def get_pi_temp():
+# 2. Fake Handshake to bypass Gemma's System Role block
+chat_history = [
+    {"role": "user", "content": "Your name is Pip. You are a helpful voice assistant. Respond concisely in the user's language (Bulgarian or English). Acknowledge this."},
+    {"role": "assistant", "content": "Understood. My name is Pip and I am ready."}
+]
+
+def get_temp():
     try:
         with open("/sys/class/thermal/thermal_zone0/temp", "r") as f:
-            temp = float(f.read()) / 1000.0
-            return f"{temp:.1f}"
-    except: return "N/A"
+            return f"{float(f.read()) / 1000.0:.1f}"
+    except: return "0.0"
 
-def update_system_stats():
-    while True:
-        ui_state["cpu_temp"] = get_pi_temp()
-        time.sleep(5)
+def is_cyrillic(text):
+    return bool(re.search('[а-яА-Я]', text))
 
-threading.Thread(target=update_system_stats, daemon=True).start()
-
-def generate_status_panel():
-    temp_val = float(ui_state["cpu_temp"]) if ui_state["cpu_temp"] != "N/A" else 0
-    t_color = "green" if temp_val < 60 else "yellow" if temp_val < 75 else "red"
+def speak(text, live):
+    if not text: return
+    clean_text = re.sub(r'<\|.*?\|>', '', text).strip()
+    model = PIPER_BG if is_cyrillic(clean_text) else PIPER_EN
+    clean_tts = re.sub(r'[^a-zA-Z0-9\s.,?!а-яА-Я]', ' ', clean_text).strip()
     
-    status_text = Text.assemble(
-        (f" ● ", f"bold {ui_state['color']}"),
-        (f"{ui_state['status']}: ", "bold white"),
-        (f"\"{ui_state['partial']}\"", "italic gray70"),
-        ("\n"),
-        (f" CPU TEMP: ", "bold white"),
-        (f"{ui_state['cpu_temp']}°C", f"bold {t_color}"),
-        (f" | LLM TEMP: ", "bold blue"),
-        (f"{LLM_TEMP}", "bold white")
-    )
-    return Panel(status_text, border_style=ui_state['color'], title="[bold]Pip System Status")
+    live.update(Panel(Text(f"Pip: {clean_tts}\nStatus: Speaking...")))
+    os.system(f"echo '{clean_tts}' | piper --model {model} --output_raw | aplay -r 22050 -f S16_LE -t raw -q")
 
-# --- 3. THE BRAIN ---
-def ask_pc(question, live_ui):
+def ask_pc(question):
     global chat_history
+    if len(chat_history) > 6: 
+        chat_history = chat_history[:2] + chat_history[-4:]
+    
     chat_history.append({"role": "user", "content": question})
     
-    tools = [{
-        'type': 'function',
-        'function': {
-            'name': 'web_search',
-            'description': 'Search for news',
-            'parameters': {'type': 'object', 'properties': {'query': {'type': 'string'}}, 'required': ['query']}
-        }
-    }]
-
+    # Send the question through Tailscale to the PC
+    payload = {
+        "model": "gemma4:e2b",
+        "messages": chat_history,
+        "stream": False
+    }
+    
     try:
-        payload = {
-            "model": MODEL, 
-            "messages": chat_history, 
-            "tools": tools,
-            "stream": False,
-            "options": {"temperature": LLM_TEMP}
-        }
-        
-        response = requests.post(f"{PC_HOST}/api/chat", json=payload, timeout=60)
-        response.raise_for_status()
-        data = response.json()
-        msg = data.get("message", {})
-        
-        if msg.get("tool_calls"):
-            for tool in msg["tool_calls"]:
-                query = tool['function']['arguments']['query']
-                live_ui.console.print(f"[bold yellow]🔍 Searching:[/] {query}")
-                with DDGS(timeout=10) as ddgs:
-                    search_res = ddgs.text(query, max_results=3, backend="api")
-                    search_text = " ".join([r.get('body', '') for r in search_res])
-                
-                chat_history.append(msg)
-                chat_history.append({"role": "tool", "content": search_text})
-                
-                final_res = requests.post(f"{PC_HOST}/api/chat", 
-                                        json={"model": MODEL, "messages": chat_history, "stream": False}, 
-                                        timeout=60).json()
-                msg = final_res.get("message", {})
-
-        ans = msg.get("content", "").strip()
-        chat_history.append({"role": "assistant", "content": ans})
-        return ans
+        url = f"http://{PC_TAILSCALE_IP}:11434/api/chat"
+        r = requests.post(url, json=payload, timeout=15)
+        if r.status_code == 200:
+            ans = r.json().get("message", {}).get("content", "").strip()
+            chat_history.append({"role": "assistant", "content": ans})
+            return ans
+        return f"PC Server Error: {r.status_code}"
     except Exception as e:
-        live_ui.console.print(f"[bold red]ERROR:[/] {str(e)}")
-        return f"Error: {str(e)}"
+        return "Tunnel Error: Could not reach the PC."
 
-def speak(text, live_ui):
-    if not text: return
-    clean = re.sub(r'[^a-zA-Z0-9\s.,?!]', ' ', text).strip()
-    live_ui.console.print(Panel(clean, title="Pip", border_style="magenta"))
-    cmd = f"echo '{clean}' | piper --model {PIPER_MODEL} --output_raw 2>/dev/null | aplay -r 22050 -f S16_LE -t raw -B 250000 -q"
-    os.system(cmd)
-
-# --- 4. MAIN ---
 def main():
-    try:
-        vosk_model = Model(VOSK_MODEL_PATH)
-        rec = KaldiRecognizer(vosk_model, 16000)
-    except Exception as e:
-        console.print(f"[bold red]FATAL:[/] Could not load Vosk model: {e}")
-        return
-
-    def audio_callback(indata, frames, time, status):
+    v_model = Model(VOSK_PATH)
+    rec = KaldiRecognizer(v_model, 48000)
+    
+    def callback(indata, frames, time, status): 
         audio_q.put(bytes(indata))
-
-    with sd.RawInputStream(samplerate=16000, blocksize=4000, dtype='int16', channels=1, callback=audio_callback):
-        console.clear()
-        with Live(generate_status_panel(), refresh_per_second=10) as live:
-            is_active = False
+    
+    with sd.RawInputStream(samplerate=48000, blocksize=8000, dtype='int16', channels=1, callback=callback):
+        with Live(Panel(Text("Booting Pip...")), refresh_per_second=4) as live:
             while True:
+                temp = get_temp()
                 data = audio_q.get()
                 if rec.AcceptWaveform(data):
-                    heard = json.loads(rec.Result()).get("text", "").lower()
-                    if not heard: continue
-                    
-                    if not is_active and WAKE_WORD in heard:
-                        is_active = True
-                        ui_state.update({"status": "Listening", "color": "yellow", "partial": ""})
-                        q = heard.split(WAKE_WORD)[-1].strip()
-                        if q:
-                            ui_state.update({"status": "Thinking", "color": "magenta", "partial": q})
-                            speak(ask_pc(q, live), live)
-                            is_active = False
-                            ui_state.update({"status": "Idle", "color": "cyan", "partial": ""})
-                    elif is_active:
-                        ui_state.update({"status": "Thinking", "color": "magenta", "partial": heard})
-                        speak(ask_pc(heard, live), live)
-                        is_active = False
-                        ui_state.update({"status": "Idle", "color": "cyan", "partial": ""})
+                    heard = json.loads(rec.Result()).get("text", "")
+                    if WAKE_WORD in heard.lower():
+                        live.update(Panel(Text(f"Status: Listening... | Temp: {temp}°C", style="yellow")))
+                        
+                        with audio_q.mutex: audio_q.queue.clear()
+                        frames_list = []
+                        start_time = time.time()
+                        
+                        while time.time() - start_time < 5.0:
+                            try:
+                                frames_list.append(audio_q.get(timeout=0.1))
+                            except queue.Empty:
+                                pass
+                        
+                        raw_bytes = b"".join(frames_list)
+                        audio_data = np.frombuffer(raw_bytes, dtype=np.int16)
+                        wav.write("query.wav", 48000, audio_data)
+                        
+                        live.update(Panel(Text(f"Status: Transcribing... | Temp: {temp}°C", style="magenta")))
+                        segments, _ = stt_model.transcribe("query.wav", beam_size=5)
+                        q_text = "".join([s.text for s in segments]).strip()
+                        
+                        if q_text and len(q_text) > 2:
+                            live.update(Panel(Text(f"Q: {q_text}\nStatus: PC Thinking... | Temp: {temp}°C", style="cyan")))
+                            ans = ask_pc(q_text)
+                            speak(ans, live)
+                        else:
+                            live.update(Panel(Text(f"Failed to hear you. Whisper heard: '{q_text}'", style="red")))
+                            time.sleep(3)
+                        
+                        with audio_q.mutex: audio_q.queue.clear()
+                        live.update(Panel(Text(f"Status: Waiting for 'Pi' | Temp: {temp}°C", style="green")))
                 else:
-                    ui_state["partial"] = json.loads(rec.PartialResult()).get("partial", "")
-                live.update(generate_status_panel())
+                    live.update(Panel(Text(f"Status: Waiting for 'Pi' | Temp: {temp}°C", style="green")))
 
 if __name__ == "__main__":
-    old = termios.tcgetattr(sys.stdin)
-    try:
-        tty.setcbreak(sys.stdin.fileno())
-        main()
-    finally:
-        termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old)
+    main()
